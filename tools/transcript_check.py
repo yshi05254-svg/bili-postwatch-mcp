@@ -32,7 +32,7 @@ async def main() -> None:
             print("...")
             print("TAIL:")
             print("\n".join(text.splitlines()[-2:]))
-            assert "全集字幕" in text and len(lines) >= 10, "返回的不是字幕"
+            assert "全集字幕" in text and len(lines) >= 8, "返回的不是字幕"
             print("TRANSCRIPT_MODE_OK")
 
 

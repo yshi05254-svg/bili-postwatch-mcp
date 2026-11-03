@@ -2,6 +2,7 @@
 
 import logging
 import re
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -28,30 +29,58 @@ async def _get_json(client: httpx.AsyncClient, url: str) -> dict:
     return resp.json()
 
 
-async def extract_bvid(text: str) -> str:
-    """从任意输入（URL / 纯 BV 号 / 含短链的文本）中解析出 BV 号。
+def _page_from_text(text: str) -> int:
+    """从 URL 中解析分 P 序号（?p=2），非 URL 或无该参数时返回 1。"""
+    try:
+        raw = parse_qs(urlparse(text).query).get("p", ["1"])[0]
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
 
-    b23.tv 短链会先跟随重定向拿到真实 URL 再做正则匹配。
+
+async def resolve_bili_input(text: str) -> tuple[str, int, str]:
+    """解析用户输入，返回 (bvid, 分P序号, 可直接下载的完整 URL)。
+
+    支持完整链接（含 ?p=N 分 P 参数）、纯 BV 号、b23.tv 短链。
     """
     if not text:
         raise ValueError("输入为空，无法解析 BV 号")
+
     match = BVID_RE.search(text)
     if match:
-        return match.group()
+        bvid = match.group()
+        page = _page_from_text(text)
+        url = f"https://www.bilibili.com/video/{bvid}"
+        if page > 1:
+            url += f"?p={page}"
+        return bvid, page, url
 
     if "b23.tv" in text:
         url = text if text.startswith("http") else f"https://{text}"
         async with httpx.AsyncClient(follow_redirects=True, timeout=_TIMEOUT) as client:
             resp = await client.get(url, headers=_HEADERS)
             resp.raise_for_status()
-            # 依次检查最终 URL、重定向链上每一跳、以及响应体里内嵌的地址
-            candidates = [str(resp.url)] + [str(h.url) for h in resp.history] + [resp.text]
-            for cand in candidates:
+            # 优先用最终落地 URL（自带 ?p=N），再检查重定向链与响应体内嵌地址
+            final_url = str(resp.url)
+            for cand in [final_url] + [str(h.url) for h in resp.history] + [resp.text]:
                 match = BVID_RE.search(cand)
                 if match:
-                    return match.group()
+                    page = _page_from_text(cand)
+                    if BVID_RE.search(final_url):
+                        download_url = final_url
+                    else:
+                        download_url = f"https://www.bilibili.com/video/{match.group()}"
+                        if page > 1:
+                            download_url += f"?p={page}"
+                    return match.group(), page, download_url
 
     raise ValueError(f"无法从输入中解析 BV 号: {text}")
+
+
+async def extract_bvid(text: str) -> str:
+    """从任意输入中解析出 BV 号（兼容既有调用方）。"""
+    bvid, _, _ = await resolve_bili_input(text)
+    return bvid
 
 
 async def _fetch_tags(client: httpx.AsyncClient, bvid: str) -> list[str]:

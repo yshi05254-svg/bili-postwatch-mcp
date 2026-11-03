@@ -24,8 +24,10 @@ ffplay.exe
 ffprobe.exe
 
 # ---- 本地测试/调试产物 ----
-tools/*_out.txt
-tools/yaml_check.txt
+# 运行日志、探针输出、会话扫描结果等一律不入库
+tools/*.txt
+toolsrun_*.txt
+*_out.txt
 *.log
 
 # ---- 系统与编辑器 ----

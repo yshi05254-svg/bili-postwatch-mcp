@@ -175,6 +175,73 @@ def test_time_utils() -> None:
     check("parse_time_to_ms('abc') is None", parse_time_to_ms("abc") is None)
 
 
+def test_input_parsing() -> None:
+    print("\n== 输入解析（BV / 分P） ==")
+    from src.extractor.bili_meta import _page_from_text
+
+    check("?p=2 解析为 2", _page_from_text("https://www.bilibili.com/video/BV1xx411c7mD/?p=2") == 2)
+    check("无 p 参数为 1", _page_from_text("https://www.bilibili.com/video/BV1xx411c7mD/") == 1)
+    check("非法 p 回退 1", _page_from_text("https://www.bilibili.com/video/BV1xx411c7mD/?p=abc") == 1)
+
+
+def test_asr_fallback_tokenizer() -> None:
+    print("\n== ASR 伪词兜底（英文不得拆字母） ==")
+    from types import SimpleNamespace
+
+    from src.asr.tencent_batch_asr import _extract_words_from_sentence
+
+    sent = SimpleNamespace(
+        StartMs=1000, EndMs=6000, FinalSentence="Hello world こんにちは", Words=None
+    )
+    items = _extract_words_from_sentence(sent, 0)
+    tokens = [w.word for w in items]
+    check("英文整词保留", "Hello" in tokens and "world" in tokens, f"实际 {tokens}")
+    check(
+        "无孤立 ASCII 单字母",
+        not any(len(t) == 1 and t.isascii() and t.isalpha() for t in tokens),
+        f"实际 {tokens}",
+    )
+    check("时间戳单调不减", all(items[i].start_ms <= items[i + 1].start_ms for i in range(len(items) - 1)))
+    check("末词终点贴近句末", abs(items[-1].end_ms - 6000) <= 1)
+
+
+def test_result_text_fallback() -> None:
+    print("\n== ResTextFormat=0 的 Result 句级时间码解析 ==")
+    from src.asr.tencent_batch_asr import _time_token_to_ms, _words_from_result_text
+
+    check("'0:1.240' -> 1240ms", _time_token_to_ms("0:1.240") == 1240)
+    check("'1:49.620' -> 109620ms", _time_token_to_ms("1:49.620") == 109620)
+    check("'1:02:03.5' -> 3723500ms", _time_token_to_ms("1:02:03.5") == 3723500)
+
+    result = (
+        "[0:1.240,0:5.000]  こんにちは世界"
+        "[0:6.000,0:10.500]  Hello there"
+        "[0:12.000,0:15.000]  お元気ですか"
+    )
+    words = _words_from_result_text(result, chunk_offset_ms=600_000)
+    check("三句均被解析", len(words) == len("こんにちは世界") + 2 + len("お元気ですか"), f"实际 {len(words)}")
+    check("英文整词保留", {"Hello", "there"} <= {w.word for w in words})
+    check("首词带切片偏移", words[0].start_ms >= 600_000)
+    check("时间单调不减", all(words[i].start_ms <= words[i + 1].start_ms for i in range(len(words) - 1)))
+    check("末词不超句末", words[-1].end_ms == 600_000 + 15_000)
+
+
+async def test_async_input_resolution() -> None:
+    print("\n== 异步输入解析（分P 下载地址） ==")
+    from src.extractor.bili_meta import resolve_bili_input
+
+    bvid, page, url = await resolve_bili_input(
+        "https://www.bilibili.com/video/BV1xx411c7mD/?p=2"
+    )
+    check("bvid 正确", bvid == "BV1xx411c7mD")
+    check("page 正确", page == 2)
+    check("下载地址带 ?p=2", url.endswith("?p=2"))
+
+    bvid2, page2, url2 = await resolve_bili_input("BV1xx411c7mD")
+    check("纯 BV 号 page=1", page2 == 1)
+    check("纯 BV 号生成标准地址", url2 == "https://www.bilibili.com/video/BV1xx411c7mD")
+
+
 def test_align_with_drift() -> None:
     print("\n== 滑动游标对齐（含 LLM 字符漂移） ==")
     text = "こんにちは、今日はいい天気ですね。明日は雨かもしれません。"
@@ -287,11 +354,11 @@ async def run_meta_only(url: str) -> None:
     print(meta.to_context_string())
 
 
-async def run_full_pipeline(url: str, language: str) -> None:
+async def run_full_pipeline(url: str, language: str, force: bool = False) -> None:
     from src.server import process_episode
 
-    bvid, digest = await process_episode(url, language=language)
-    print(f"\n===== {bvid} 全景陪看记忆档案 =====\n")
+    bvid, digest = await process_episode(url, language=language, force_refresh=force)
+    print(f"\n===== {bvid} 已建档 =====\n")
     print(digest)
 
 
@@ -300,17 +367,22 @@ def main() -> None:
     parser.add_argument("--meta", metavar="URL_OR_BVID", help="仅测试 B 站元数据抓取")
     parser.add_argument("--url", metavar="URL_OR_BVID", help="全量真实流水线")
     parser.add_argument("--language", default="16k_ja", help="ASR 引擎，默认 16k_ja")
+    parser.add_argument("--force", action="store_true", help="忽略缓存强制重建")
     args = parser.parse_args()
 
     if args.meta:
         asyncio.run(run_meta_only(args.meta))
         return
     if args.url:
-        asyncio.run(run_full_pipeline(args.url, args.language))
+        asyncio.run(run_full_pipeline(args.url, args.language, args.force))
         return
 
     test_time_utils()
+    test_input_parsing()
+    test_asr_fallback_tokenizer()
+    test_result_text_fallback()
     test_align_with_drift()
+    asyncio.run(test_async_input_resolution())
     asyncio.run(test_mock_closed_loop())
 
 

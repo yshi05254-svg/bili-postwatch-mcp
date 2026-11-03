@@ -17,7 +17,10 @@ from src.schemas import RawSegment, WordItem
 
 logger = logging.getLogger("bili-postwatch.splitter")
 
+# 150 是规约值：单块越小，LLM 断句越细、对齐漂移越小（实测 400 词块会把多句合并成一句）。
+# 速度问题由下方的 Semaphore 并发解决，而不是放大分块。
 WORDS_PER_CHUNK = 150
+MAX_SPLIT_CONCURRENCY = 5
 _SPLIT_RETRIES = 2  # LLM 断句失败时的额外重试次数
 
 
@@ -136,53 +139,63 @@ async def split_words_into_segments(
     words: list[WordItem],
     language: str = "16k_ja",
     client=None,
+    max_concurrency: int = MAX_SPLIT_CONCURRENCY,
 ) -> list[RawSegment]:
-    """按 150 词分块 -> LLM 插入 || -> 游标对齐，返回全集 RawSegment 列表。
+    """按 150 词分块 -> 并发请求 LLM 插入 || -> 游标对齐，返回全集 RawSegment 列表。
 
     单块 LLM 失败时重试 _SPLIT_RETRIES 次；仍失败则整块退化为一个粗句，
-    绝不中断整集流水线。
+    绝不中断整集流水线。各块互不依赖，用 Semaphore 限流并发执行。
     """
     if not words:
         return []
     if client is None:
         client = config.require_llm_client()
 
-    segments: list[RawSegment] = []
-    for chunk_start in range(0, len(words), WORDS_PER_CHUNK):
-        chunk = words[chunk_start : chunk_start + WORDS_PER_CHUNK]
+    semaphore = asyncio.Semaphore(max_concurrency)
+    chunks = [
+        words[i : i + WORDS_PER_CHUNK] for i in range(0, len(words), WORDS_PER_CHUNK)
+    ]
+
+    async def _process_chunk(chunk_idx: int, chunk: list[WordItem]) -> list[RawSegment]:
         chunk_text = join_words_naturally(chunk)
         llm_split_text = ""
         last_err: Exception | None = None
         for attempt in range(_SPLIT_RETRIES + 1):
             try:
-                llm_split_text = await _llm_split_once(client, chunk_text)
+                async with semaphore:
+                    llm_split_text = await _llm_split_once(client, chunk_text)
                 break
             except Exception as err:  # noqa: BLE001
                 last_err = err
                 logger.warning(
-                    "断句块 %d 第 %d 次调用失败: %s",
-                    chunk_start // WORDS_PER_CHUNK + 1, attempt + 1, err,
+                    "断句块 %d 第 %d 次调用失败: %s", chunk_idx + 1, attempt + 1, err
                 )
                 await asyncio.sleep(1.0 * (attempt + 1))
 
         if llm_split_text:
-            block_segments = align_split_sentences(
-                chunk, llm_split_text, start_index=len(segments) + 1
+            # 块内 index 从 1 开始，合并后统一重排
+            return align_split_sentences(chunk, llm_split_text, start_index=1)
+
+        logger.error(
+            "断句块 %d 彻底失败(%s)，整块退化为粗句: %s",
+            chunk_idx + 1, last_err, chunk_text[:50],
+        )
+        return [
+            RawSegment(
+                index=1,
+                start_ms=chunk[0].start_ms,
+                end_ms=chunk[-1].end_ms,
+                text=chunk_text,
             )
-        else:
-            logger.error(
-                "断句块 %d 彻底失败(%s)，整块退化为粗句: %s",
-                chunk_start // WORDS_PER_CHUNK + 1, last_err, chunk_text[:50],
-            )
-            block_segments = [
-                RawSegment(
-                    index=len(segments) + 1,
-                    start_ms=chunk[0].start_ms,
-                    end_ms=chunk[-1].end_ms,
-                    text=chunk_text,
-                )
-            ]
-        segments.extend(block_segments)
+        ]
+
+    block_results = await asyncio.gather(
+        *(_process_chunk(idx, chunk) for idx, chunk in enumerate(chunks))
+    )
+
+    segments: list[RawSegment] = []
+    for block in block_results:  # gather 保持提交顺序，即原音频时间顺序
+        segments.extend(block)
 
     # index 防御性重排，保证 1..N 连续
     for i, seg in enumerate(segments, start=1):

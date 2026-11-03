@@ -41,6 +41,12 @@ LLM_MODEL = os.getenv("LLM_MODEL", "hunyuan-turbos-latest")
 # ---------------------------------------------------------------------------
 BILI_COOKIES_FILE = os.getenv("BILI_COOKIES_FILE", "")
 
+# 扫码登录凭证的本地持久化文件（长期保存，data/ 已被 .gitignore 排除）。
+# 结构与保存时机见 src/extractor/bili_auth.py
+BILI_CREDENTIALS_FILE = Path(
+    os.getenv("BILI_CREDENTIALS_FILE", str(DATA_DIR / "bili_credentials.json"))
+)
+
 # CreateRecTask SourceType=1 (Base64 直传) 的单分片硬上限
 MAX_CHUNK_BYTES = 5 * 1024 * 1024
 
@@ -134,12 +140,16 @@ async def chat_text(
         try:
             resp = await client.chat.completions.create(**kwargs)
             return resp.choices[0].message.content or ""
-        except Exception as err:  # noqa: BLE001 - 需要区分"不支持 response_format"与网络错误
+        except Exception as err:  # noqa: BLE001 - 需区分"不支持 response_format"与瞬时错误
             last_err = err
-            if json_mode and "response_format" not in kwargs:
-                break
-            if json_mode:
-                # 可能是端点不支持 response_format，去掉后重试
+            # 仅当端点明确拒绝 response_format（400 + 参数相关）时才降级，
+            # 网络超时等瞬时错误保持 JSON 模式重试，避免误降级。
+            msg = str(err).lower()
+            status = getattr(err, "status_code", None)
+            rejected_format = json_mode and status == 400 and (
+                "response_format" in msg or "json_object" in msg
+            )
+            if rejected_format:
                 kwargs.pop("response_format", None)
                 json_mode = False
                 continue
@@ -149,9 +159,24 @@ async def chat_text(
 
 
 def configure_logging() -> None:
-    """MCP stdio 模式下 stdout 是协议通道，日志必须走 stderr。"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        stream=sys.stderr,
+    """MCP stdio 模式下 stdout 是协议通道，日志必须走 stderr。
+
+    同时落盘到 data/server.log（5MB×3 轮转），便于排查"工具调用卡住"这类运行时问题。
+    """
+    from logging.handlers import RotatingFileHandler
+
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    stream = logging.StreamHandler(sys.stderr)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
+
+    file_handler = RotatingFileHandler(
+        DATA_DIR / "server.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
     )
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)

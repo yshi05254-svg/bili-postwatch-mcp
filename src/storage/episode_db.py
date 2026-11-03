@@ -125,7 +125,13 @@ class EpisodeDB:
         glossary: dict,
         lines: list[TranslatedLine],
         digest: str,
+        episode_key: str | None = None,
     ) -> None:
+        """写入全集档案与逐句台本。
+
+        episode_key 用于区分分 P 视频（如 BVxxx_p2），默认为 bvid。
+        """
+        key = episode_key or meta.bvid
         await self.init_db()
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute("BEGIN")
@@ -133,22 +139,22 @@ class EpisodeDB:
                 "INSERT OR REPLACE INTO episodes "
                 "(bvid, title, meta_json, glossary_json, digest_markdown) VALUES (?, ?, ?, ?, ?)",
                 (
-                    meta.bvid,
+                    key,
                     meta.title,
                     meta.model_dump_json(),
                     json.dumps(glossary, ensure_ascii=False),
                     digest,
                 ),
             )
-            # 同一 bvid 重刷时先清空旧台本，保证 line_index 与新流水线一致
-            await conn.execute("DELETE FROM subtitle_lines WHERE bvid = ?", (meta.bvid,))
+            # 同一视频重刷时先清空旧台本，保证 line_index 与新流水线一致
+            await conn.execute("DELETE FROM subtitle_lines WHERE bvid = ?", (key,))
             await conn.executemany(
                 "INSERT INTO subtitle_lines "
                 "(bvid, line_index, start_ms, end_ms, time_range_str, original_text, "
                 " reflection_note, final_zh) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
-                        meta.bvid,
+                        key,
                         line.index,
                         line.start_ms,
                         line.end_ms,
