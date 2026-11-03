@@ -1,0 +1,8 @@
+mcp[cli]>=1.2.0,<2.0.0
+yt-dlp>=2024.10.0
+httpx>=0.27.0
+tencentcloud-sdk-python-asr>=3.0.1000
+openai>=1.50.0
+aiosqlite>=0.20.0
+pydantic>=2.9.0
+python-dotenv>=1.0.1

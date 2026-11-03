@@ -1,0 +1,36 @@
+# ---- 密钥与环境变量（绝不入库）----
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 运行时数据 ----
+data/
+temp_audio/
+*.db
+*.sqlite3
+
+# ---- 体积过大的外部二进制（超过 GitHub 100MB 单文件限制）----
+tools/ffmpeg/
+ffmpeg/
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
+
+# ---- 本地测试/调试产物 ----
+tools/*_out.txt
+tools/yaml_check.txt
+*.log
+
+# ---- 系统与编辑器 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
